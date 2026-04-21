@@ -1,0 +1,63 @@
+// prisma/schema.prisma
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Keyword {
+  id        Int      @id @default(autoincrement())
+  keyword   String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  hotspots Hotspot[]
+}
+
+model Hotspot {
+  id              Int      @id @default(autoincrement())
+  title           String
+  content         String
+  url             String   @unique
+  source          String
+  sourceId        String?
+  author          String?
+  viewCount       Int?
+  commentCount    Int?
+  likeCount       Int?
+  publishTime     DateTime?
+  crawlTime       DateTime @default(now())
+  relevanceScore  Int      // 0-100
+  importanceLevel String   // urgent/high/medium/low
+  credibilityScore Int     // 0-100
+  heatScore       Int      @default(50) // 0-100 热度分数
+  summary         String
+  analysisReason  String
+  keywordId       Int
+  
+  keyword Keyword @relation(fields: [keywordId], references: [id])
+  notifications Notification[]
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  type      String   // email/web
+  title     String
+  content   String
+  hotspotId Int?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  
+  hotspot Hotspot? @relation(fields: [hotspotId], references: [id])
+}
+
+model SystemConfig {
+  id          Int      @id @default(autoincrement())
+  key         String   @unique
+  value       String
+  updatedAt DateTime @updatedAt
+}
