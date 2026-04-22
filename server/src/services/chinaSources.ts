@@ -21,7 +21,7 @@ interface SearchResult {
 
 class ChinaSourcesService {
   private config: AxiosRequestConfig = {
-    timeout: 30000,
+    timeout: 15000, // 国内源超时15秒
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept-Language': 'zh-CN,zh;q=0.9',
@@ -55,8 +55,6 @@ class ChinaSourcesService {
           return await this.searchBilibiliAPI(keyword, limit);
         case 'weibo':
           return await this.getWeiboHotSearch(limit);
-        case 'bing':
-          return await this.searchBingNews(keyword, limit);
         default:
           console.log(`⚠️ 不支持的搜索引擎: ${engine}`);
           return [];
@@ -154,56 +152,88 @@ class ChinaSourcesService {
     try {
       console.log(`🔍 [B站API] 搜索关键词: ${keyword}`);
       
-      // 构建搜索参数
-      const searchParams = {
-        keyword,
-        search_type: 'video',
-        order: 'pubdate', // 按发布时间排序
-        page: 1,
-        page_size: limit
-      };
-      
-      // 生成WBI签名
-      const signedQuery = await this.encWbi(searchParams);
-      const url = `https://api.bilibili.com/x/web-interface/wbi/search/type?${signedQuery}`;
-      
-      const response = await axios.get(url, this.config);
-      const { code, data, message } = response.data;
-      
-      if (code !== 0) {
-        console.error(`❌ [B站API] 搜索失败: ${message}`);
-        // 如果API失败，回退到网页爬取
-        return await this.searchBilibiliWeb(keyword, limit);
-      }
-      
       const results: SearchResult[] = [];
+      const now = Date.now();
+      const ninetyDaysAgo = now - 90 * 24 * 60 * 60 * 1000; // 90天前，放宽时间限制
       
-      if (data?.result) {
-        for (const item of data.result) {
-          if (results.length >= limit) break;
+      // 搜索3页内容，获取更多数据
+      for (let page = 1; page <= 3 && results.length < limit; page++) {
+        try {
+          // 构建搜索参数
+          const searchParams = {
+            keyword,
+            search_type: 'video',
+            order: 'totalrank',
+            page,
+            page_size: limit * 2 // 多请求一些
+          };
           
-          const pubdate = item.pubdate;
-          const publishTime = pubdate ? new Date(pubdate * 1000).toISOString() : undefined;
+          // 生成WBI签名
+          const signedQuery = await this.encWbi(searchParams);
+          const url = `https://api.bilibili.com/x/web-interface/wbi/search/type?${signedQuery}`;
           
-          results.push({
-            title: this.cleanHtmlTags(item.title),
-            url: `https://www.bilibili.com/video/${item.bvid}`,
-            content: item.description || 'B站视频',
-            source: 'bilibili',
-            publishTime,
-            author: item.author,
-            viewCount: item.play,
-            commentCount: item.review,
-            likeCount: undefined // API没有返回点赞数
-          });
+          const response = await axios.get(url, this.config);
+          const { code, data, message } = response.data;
+          
+          if (code !== 0) {
+            console.error(`❌ [B站API] 第${page}页搜索失败: ${message}`);
+            break;
+          }
+          
+          if (data?.result) {
+            for (const item of data.result) {
+              if (results.length >= limit) break;
+              
+              // 筛选条件：
+              // 1. 播放量至少300，放宽更多
+              // 2. 发布时间在90天内
+              const viewCount = item.play || 0;
+              const pubdate = item.pubdate;
+              const publishTime = pubdate ? new Date(pubdate * 1000).toISOString() : undefined;
+              
+              if (viewCount < 300) continue;
+              
+              if (pubdate) {
+                const videoDate = new Date(pubdate * 1000).getTime();
+                if (videoDate < ninetyDaysAgo) continue;
+              }
+              
+              results.push({
+                title: this.cleanHtmlTags(item.title),
+                url: `https://www.bilibili.com/video/${item.bvid}`,
+                content: item.description || 'B站视频',
+                source: 'bilibili',
+                publishTime,
+                author: item.author,
+                viewCount,
+                commentCount: item.review,
+                likeCount: undefined
+              });
+            }
+          }
+          
+          // 如果这页没有结果，就不继续下一页了
+          if (!data?.result || data.result.length === 0) {
+            break;
+          }
+          
+          // 稍微延时一下，避免请求过快
+          await new Promise(resolve => setTimeout(resolve, 300));
+        } catch (pageError) {
+          console.error(`❌ [B站API] 第${page}页异常:`, pageError);
+          break;
         }
       }
       
-      console.log(`✅ [B站API] 找到 ${results.length} 条结果`);
+      if (results.length === 0) {
+        console.log(`⏭️ [B站API] 没找到内容，尝试网页爬取`);
+        return await this.searchBilibiliWeb(keyword, limit);
+      }
+      
+      console.log(`✅ [B站API] 找到 ${results.length} 条符合条件的热点视频`);
       return results;
     } catch (error) {
       console.error(`❌ [B站API] 搜索异常:`, error);
-      // 回退到网页爬取
       return await this.searchBilibiliWeb(keyword, limit);
     }
   }
@@ -214,7 +244,7 @@ class ChinaSourcesService {
   private async searchBilibiliWeb(keyword: string, limit: number): Promise<SearchResult[]> {
     try {
       console.log(`🔍 [B站网页] 搜索关键词: ${keyword}`);
-      const url = `https://search.bilibili.com/all?keyword=${encodeURIComponent(keyword)}&order=pubdate`;
+      const url = `https://search.bilibili.com/all?keyword=${encodeURIComponent(keyword)}&amp;order=totalrank`;
       const response = await axios.get(url, this.config);
       const $ = cheerio.load(response.data);
       const results: SearchResult[] = [];
@@ -246,6 +276,9 @@ class ChinaSourcesService {
         const danmakuText = $el.find('.bili-video-card__stats--item').eq(1).text().trim();
         const commentCount = this.parseNumber(danmakuText);
         
+        // 同样筛选播放量至少1000
+        if (!viewCount || viewCount < 1000) return;
+        
         results.push({
           title,
           url,
@@ -259,7 +292,7 @@ class ChinaSourcesService {
         });
       });
 
-      console.log(`✅ [B站网页] 找到 ${results.length} 条结果`);
+      console.log(`✅ [B站网页] 找到 ${results.length} 条符合条件的热点视频`);
       return results;
     } catch (error) {
       console.error(`❌ [B站网页] 搜索失败:`, error);
@@ -473,45 +506,7 @@ class ChinaSourcesService {
     }
   }
 
-  /**
-   * Bing新闻搜索
-   */
-  private async searchBingNews(keyword: string, limit: number): Promise<SearchResult[]> {
-    try {
-      const url = `https://www.bing.com/search?q=${encodeURIComponent(keyword)}&cc=CN`;
-      const response = await axios.get(url, this.config);
-      const $ = cheerio.load(response.data);
-      const results: SearchResult[] = [];
 
-      $('.b_algo, li.b_algo').each((_index: number, element: any) => {
-        if (results.length >= limit) return;
-        
-        const $el = $(element);
-        const title = $el.find('h2 a').text().trim();
-        let url = $el.find('h2 a').attr('href') || '';
-        const content = $el.find('.b_caption p').text().trim();
-        
-        if (title && url && url.startsWith('http') && !url.includes('bing.com')) {
-          results.push({
-            title,
-            url,
-            content: content || 'Bing搜索',
-            source: 'bing',
-            publishTime: undefined,
-            viewCount: undefined,
-            commentCount: undefined,
-            likeCount: undefined
-          });
-        }
-      });
-
-      console.log(`✅ [Bing新闻] 找到 ${results.length} 条结果`);
-      return results;
-    } catch (error) {
-      console.error(`❌ [Bing新闻] 搜索失败:`, error);
-      return [];
-    }
-  }
 }
 
 export default new ChinaSourcesService();

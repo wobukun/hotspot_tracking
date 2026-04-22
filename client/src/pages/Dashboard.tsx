@@ -113,10 +113,18 @@ export default function Dashboard() {
       });
     };
 
+    const handleHotspotComplete = () => {
+      console.log('Dashboard收到hotspot-complete事件，重新加载热点');
+      loadHotspots();
+      loadSystemStatus();
+    };
+
     socketService.on('hotspot', handleNewHotspot);
+    socketService.on('hotspot-complete', handleHotspotComplete);
 
     return () => {
       socketService.off('hotspot', handleNewHotspot);
+      socketService.off('hotspot-complete', handleHotspotComplete);
     };
   }, []);
 
@@ -869,7 +877,7 @@ export default function Dashboard() {
                           )}
                           {(hotspot.viewCount !== undefined && hotspot.viewCount !== null && hotspot.viewCount > 0) && (
                             <span className="flex items-center gap-1">
-                              👁{formatNumber(hotspot.viewCount)}
+                              👁️{formatNumber(hotspot.viewCount)}
                             </span>
                           )}
                           {(hotspot.commentCount !== undefined && hotspot.commentCount !== null && hotspot.commentCount > 0) && (
@@ -996,7 +1004,7 @@ export default function Dashboard() {
                           )}
                           {formatNumber(result.viewCount) && (
                             <span className="flex items-center gap-1">
-                              👁{formatNumber(result.viewCount)}
+                              👁️{formatNumber(result.viewCount)}
                             </span>
                           )}
                           {formatNumber(result.commentCount) && (

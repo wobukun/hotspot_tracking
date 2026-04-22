@@ -20,8 +20,14 @@ export default function Monitor() {
       setHotspots(prev => [newHotspot, ...prev]);
     });
 
+    socketService.on('hotspot-complete', () => {
+      console.log('收到hotspot-complete事件，重新加载热点');
+      loadHotspots();
+    });
+
     return () => {
       socketService.off('hotspot', () => {});
+      socketService.off('hotspot-complete', () => {});
     };
   }, []);
 
@@ -66,6 +72,7 @@ export default function Monitor() {
     bing: 'bg-green-100 text-green-700 border border-green-200',
     google: 'bg-red-100 text-red-700 border border-red-200',
     duckduckgo: 'bg-orange-100 text-orange-700 border border-orange-200',
+    hackernews: 'bg-yellow-100 text-yellow-700 border border-yellow-200',
     sogou: 'bg-blue-100 text-blue-700 border border-blue-200',
     bilibili: 'bg-pink-100 text-pink-700 border border-pink-200',
     weibo: 'bg-red-100 text-red-700 border border-red-200',
@@ -132,6 +139,7 @@ export default function Monitor() {
             <option value="bing">Bing</option>
             <option value="google">Google</option>
             <option value="duckduckgo">DuckDuckGo</option>
+            <option value="hackernews">HackerNews</option>
             <option value="sogou">搜狗</option>
             <option value="bilibili">B站</option>
             <option value="weibo">微博</option>

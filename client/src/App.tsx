@@ -61,6 +61,8 @@ function App() {
       setRefreshing(false);
       refreshAbortController.current = null;
       currentTaskId.current = null;
+      // 重新加载通知数据
+      loadNotifications();
     };
     
     // 监听采集失败
@@ -70,6 +72,8 @@ function App() {
       setRefreshing(false);
       refreshAbortController.current = null;
       currentTaskId.current = null;
+      // 重新加载通知数据
+      loadNotifications();
     };
 
     socketService.on('hotspot', handleNewHotspot);
@@ -111,6 +115,17 @@ function App() {
       setNotifications(notificationsData);
     } catch (error) {
       console.error('Failed to load data:', error);
+    }
+  };
+
+  const loadNotifications = async () => {
+    try {
+      const notificationsResponse = await notificationsApi.getAll();
+      const notificationsData = Array.isArray(notificationsResponse) ? notificationsResponse : (notificationsResponse.data || []);
+      console.log('加载通知数据:', notificationsData);
+      setNotifications(notificationsData);
+    } catch (error) {
+      console.error('Failed to load notifications:', error);
     }
   };
 

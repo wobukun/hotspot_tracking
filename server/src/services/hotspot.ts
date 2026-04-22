@@ -1,6 +1,7 @@
 import prisma from '../utils/prisma';
 import openrouterService from './openrouter';
 import chinaSourcesService from './chinaSources';
+import internationalSourcesService from './internationalSources';
 import { getIO } from '../utils/socket';
 import emailService from './email';
 import taskManager from './taskManager';
@@ -9,6 +10,7 @@ import cronService from './cron';
 class HotspotService {
   private readonly MAX_QUALIFIED_HOTSPOTS = 15;
   private readonly MAX_HOTSPOTS_PER_SOURCE = 3; // 每个信息源最多3条
+  private readonly MAX_HOTSPOTS_BILIBILI = 9; // B站最多9条，重点获取
 
   /**
    * 采集热点信息
@@ -65,26 +67,31 @@ class HotspotService {
         }
       }
 
-      // 检查是否已取消
+      // 统一发送邮件通知（仅在任务未取消时）
       if (!taskManager.isTaskAborted(currentTaskId)) {
-        // 统一发送邮件通知
         if (allQualifiedHotspots.length > 0) {
           await this.sendBulkEmailNotification(allQualifiedHotspots);
         }
       }
 
-      console.log(`🎉 所有热点采集任务完成！共获取 ${allQualifiedHotspots.length} 个符合条件的热点`);
+      const isAborted = taskManager.isTaskAborted(currentTaskId);
+      if (isAborted) {
+        console.log(`⏹️ 任务已取消，已获取 ${allQualifiedHotspots.length} 个符合条件的热点`);
+      } else {
+        console.log(`🎉 所有热点采集任务完成！共获取 ${allQualifiedHotspots.length} 个符合条件的热点`);
+      }
       
       // 更新最后和下次更新时间
       const now = new Date();
       cronService.setLastUpdateTime(now);
       
-      // 发送采集完成的 socket 事件
+      // 发送采集完成的 socket 事件（无论任务是否取消都发送）
       try {
         const io = getIO();
         io.emit('hotspot-complete', { 
           taskId: currentTaskId,
-          count: allQualifiedHotspots.length 
+          count: allQualifiedHotspots.length,
+          isAborted: isAborted
         });
         console.log('📡 发送热点采集完成事件');
       } catch (error) {
@@ -147,15 +154,20 @@ class HotspotService {
         expandedKeywords = [keyword.keyword];
       }
 
-      // 定义信息源
+      // 定义信息源 - 国内源优先，B站第一位
       const sources = [
-        { engine: 'sogou', name: '搜狗搜索' },
-        { engine: 'bilibili', name: 'B站搜索' },
-        { engine: 'weibo', name: '微博热搜' },
-        { engine: 'bing', name: 'Bing搜索' }
+        // 中国信息源 - 优先获取
+        { engine: 'bilibili', name: 'B站搜索', service: chinaSourcesService },
+        { engine: 'weibo', name: '微博热搜', service: chinaSourcesService },
+        { engine: 'sogou', name: '搜狗搜索', service: chinaSourcesService },
+        // 国际信息源 - 作为补充
+        { engine: 'bing', name: 'Bing搜索', service: internationalSourcesService },
+        { engine: 'google', name: 'Google搜索', service: internationalSourcesService },
+        { engine: 'duckduckgo', name: 'DuckDuckGo搜索', service: internationalSourcesService },
+        { engine: 'hackernews', name: 'HackerNews搜索', service: internationalSourcesService }
       ];
 
-      // 逐个信息源采集，每找到一个就检查
+      // 逐个信息源采集
       for (const source of sources) {
         // 检查是否已取消
         if (taskManager.isTaskAborted(taskId)) {
@@ -164,50 +176,101 @@ class HotspotService {
         }
         
         // 检查该来源是否已达到上限
-        if ((sourceCount[source.engine] || 0) >= this.MAX_HOTSPOTS_PER_SOURCE) {
-          console.log(`⏭️ ${source.name} 已达到上限 (${this.MAX_HOTSPOTS_PER_SOURCE})，跳过`);
+        const currentLimit = source.engine === 'bilibili' ? this.MAX_HOTSPOTS_BILIBILI : this.MAX_HOTSPOTS_PER_SOURCE;
+        if ((sourceCount[source.engine] || 0) >= currentLimit) {
+          console.log(`⏭️ ${source.name} 已达到上限 (${currentLimit})，跳过`);
           continue;
         }
         
         try {
           console.log(`🌐 开始从 ${source.name} 采集数据...`);
-          const results = await this.fetchFromSearchEngine(source.engine, expandedKeywords);
-          console.log(`📊 ${source.name} 找到 ${results.length} 条原始结果`);
-
-          // 逐条检查
-          for (const result of results) {
+          
+          // 获取该信息源的关键词列表
+          const keywordsToUse = this.getSourceKeywords(source, expandedKeywords);
+          
+          let shouldSkipThisSource = false;
+          
+          // 逐个关键词搜索
+          for (const searchKeyword of keywordsToUse) {
+            if (shouldSkipThisSource) break;
+            
             // 检查是否已取消
             if (taskManager.isTaskAborted(taskId)) {
               console.log('⏹️ 任务已取消，停止采集');
               break;
             }
             
-            // 检查是否已达到最大数量
+            // 检查是否已达到总上限
             if (existingQualifiedHotspots.length + qualifiedHotspots.length >= this.MAX_QUALIFIED_HOTSPOTS) {
+              console.log(`✅ 已达到最大数量 ${this.MAX_QUALIFIED_HOTSPOTS}，停止采集`);
               break;
             }
             
             // 检查该来源是否已达到上限
-            if ((sourceCount[source.engine] || 0) >= this.MAX_HOTSPOTS_PER_SOURCE) {
-              console.log(`⏭️ ${source.name} 已达到上限 (${this.MAX_HOTSPOTS_PER_SOURCE})，停止继续从该来源采集`);
+            const limitCheck = source.engine === 'bilibili' ? this.MAX_HOTSPOTS_BILIBILI : this.MAX_HOTSPOTS_PER_SOURCE;
+            if ((sourceCount[source.engine] || 0) >= limitCheck) {
+              console.log(`⏭️ ${source.name} 已达到上限 (${limitCheck})，停止继续从该来源采集`);
               break;
             }
-
-            // 检查并处理结果
-            const hotspot = await this.checkAndSaveResult(result, keyword.id, sourceCount);
-            if (hotspot) {
-              qualifiedHotspots.push(hotspot);
-              console.log(`✅ 找到符合条件的热点: ${hotspot.title}`);
+            
+            try {
+              console.log(`🔍 ${source.name} 搜索关键词: ${searchKeyword}`);
+              
+              // 获取搜索结果
+              const results = await this.fetchSingleSourceBatch(source, searchKeyword);
+              
+              if (results.length === 0) {
+                console.log(`⏭️ ${source.name} 没有找到结果，继续下一个关键词`);
+                continue;
+              }
+              
+              console.log(`📊 ${source.name} 找到 ${results.length} 条原始结果`);
+              
+              // 逐条处理结果：获取一条 -> 分析 -> 展示 -> 计数 -> 再获取
+              for (const result of results) {
+                // 检查是否已取消
+                if (taskManager.isTaskAborted(taskId)) {
+                  console.log('⏹️ 任务已取消，停止采集');
+                  break;
+                }
+                
+                // 检查是否已达到总上限
+                if (existingQualifiedHotspots.length + qualifiedHotspots.length >= this.MAX_QUALIFIED_HOTSPOTS) {
+                  break;
+                }
+                
+                // 检查该来源是否已达到上限
+                const sourceLimit = source.engine === 'bilibili' ? this.MAX_HOTSPOTS_BILIBILI : this.MAX_HOTSPOTS_PER_SOURCE;
+                if ((sourceCount[source.engine] || 0) >= sourceLimit) {
+                  console.log(`⏭️ ${source.name} 已达到上限 (${sourceLimit})，停止继续从该来源采集`);
+                  break;
+                }
+                
+                // 检查并处理结果（获取-分析-展示-计数）
+                const hotspot = await this.checkAndSaveResult(result, keyword.id, sourceCount);
+                if (hotspot) {
+                  qualifiedHotspots.push(hotspot);
+                  console.log(`✅ 找到符合条件的热点: ${hotspot.title}`);
+                }
+              }
+              
+            } catch (searchError) {
+              console.error(`❌ ${source.name} 搜索 "${searchKeyword}" 失败:`, searchError);
+              console.log(`⏭️ 跳过 ${source.name}，直接获取下一个信息源`);
+              // 该信息源报错了，直接跳过整个信息源
+              shouldSkipThisSource = true;
+              break;
             }
           }
-
-          // 再次检查是否达到最大数量
+          
+          // 检查是否达到总上限
           if (existingQualifiedHotspots.length + qualifiedHotspots.length >= this.MAX_QUALIFIED_HOTSPOTS) {
-            console.log(`✅ 已达到最大数量 ${this.MAX_QUALIFIED_HOTSPOTS}，停止采集`);
             break;
           }
+          
         } catch (error) {
-          console.error(`❌ ${source.name} 采集失败:`, error);
+          console.error(`❌ ${source.name} 采集失败，直接跳过该信息源:`, error);
+          // 继续下一个信息源
         }
       }
 
@@ -216,6 +279,53 @@ class HotspotService {
       console.error(`❌ 关键词 ${keyword.keyword} 总采集过程失败:`, error);
       return qualifiedHotspots;
     }
+  }
+  
+  /**
+   * 获取信息源应该使用的关键词列表
+   */
+  private getSourceKeywords(source: any, expandedKeywords: string[]): string[] {
+    // 微博热搜不需要多个关键词
+    if (source.engine === 'weibo') {
+      return [expandedKeywords[0] || '热搜'];
+    }
+    
+    // HackerNews 主要是热门话题，不需要多个关键词
+    if (source.engine === 'hackernews') {
+      return [expandedKeywords[0]];
+    }
+    
+    // B站用所有关键词
+    if (source.engine === 'bilibili') {
+      return expandedKeywords;
+    }
+    
+    // 其他信息源用所有关键词
+    return expandedKeywords;
+  }
+  
+  /**
+   * 从单个信息源获取一批搜索结果
+   */
+  private async fetchSingleSourceBatch(source: any, keyword: string): Promise<any[]> {
+    // 不同信息源获取不同数量
+    let limit = 2; // 默认每个关键词搜2条
+    if (source.engine === 'bilibili') {
+      limit = 4; // B站每个关键词搜4条
+    } else if (source.engine === 'weibo' || source.engine === 'hackernews') {
+      limit = 5; // 微博和HackerNews一次获取5条
+    }
+    
+    const searchResults = await source.service.search(source.engine, keyword, limit);
+    
+    // 去重
+    const uniqueUrls = new Set();
+    return searchResults.filter((result: any) => {
+      if (!result.url) return false;
+      if (uniqueUrls.has(result.url)) return false;
+      uniqueUrls.add(result.url);
+      return true;
+    });
   }
 
   /**
@@ -325,7 +435,10 @@ class HotspotService {
     // 信息源可信度权重
     const sourceCredibility: Record<string, number> = {
       'bing': 25,
+      'google': 25,
+      'hackernews': 24,
       'sogou': 20,
+      'duckduckgo': 19,
       'bilibili': 18,
       'weibo': 15
     };
@@ -488,44 +601,7 @@ class HotspotService {
     }
   }
 
-  /**
-   * 从搜索引擎/信息源采集信息
-   * @param engine 搜索引擎/信息源
-   * @param keywords 关键词列表
-   */
-  private async fetchFromSearchEngine(engine: string, keywords: string[]) {
-    const results = [];
-    
-    // 微博热搜不需要关键词，只获取一次
-    if (engine === 'weibo') {
-      try {
-        const searchResults = await chinaSourcesService.search(engine, keywords[0] || '热搜', 5);
-        results.push(...searchResults);
-      } catch (error) {
-        console.error(`⚠️ ${engine} 获取失败，继续:`, error);
-      }
-      return results;
-    }
 
-    // 其他信息源针对每个关键词搜索
-    for (const keyword of keywords) {
-      try {
-        const searchResults = await chinaSourcesService.search(engine, keyword, 2);
-        results.push(...searchResults);
-      } catch (error) {
-        console.error(`⚠️ ${engine} 搜索 "${keyword}" 失败，继续:`, error);
-      }
-    }
-    
-    // 去重
-    const uniqueUrls = new Set();
-    return results.filter(result => {
-      if (!result.url) return false;
-      if (uniqueUrls.has(result.url)) return false;
-      uniqueUrls.add(result.url);
-      return true;
-    });
-  }
 
   /**
    * 发送 WebSocket 通知 - 立即显示在页面上
@@ -545,6 +621,7 @@ class HotspotService {
    */
   private async saveNotificationRecord(hotspot: any) {
     try {
+      // 创建新通知
       await prisma.notification.create({
         data: {
           type: 'web',
@@ -553,8 +630,43 @@ class HotspotService {
           hotspotId: hotspot.id
         }
       });
+
+      // 清理旧通知，保留最新的 50 条
+      await this.cleanupOldNotifications();
     } catch (error) {
       console.error('⚠️ 保存通知记录失败:', error);
+    }
+  }
+
+  /**
+   * 清理旧通知，保留最新的 50 条
+   */
+  private async cleanupOldNotifications() {
+    try {
+      // 先统计总共有多少条通知
+      const totalCount = await prisma.notification.count();
+      
+      if (totalCount > 50) {
+        // 获取第 50 条通知的创建时间
+        const notifications = await prisma.notification.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          select: { createdAt: true }
+        });
+        
+        if (notifications.length === 50) {
+          const thresholdDate = notifications[49].createdAt;
+          
+          // 删除所有早于阈值日期的通知
+          const deletedCount = await prisma.notification.deleteMany({
+            where: { createdAt: { lt: thresholdDate } }
+          });
+          
+          console.log(`🗑️ 清理了 ${deletedCount.count} 条旧通知，保留最新的 50 条`);
+        }
+      }
+    } catch (error) {
+      console.error('⚠️ 清理旧通知失败:', error);
     }
   }
 
@@ -596,24 +708,62 @@ class HotspotService {
     console.log(`🔍 开始全网搜索: ${query}`);
     
     const results = [];
+    const sourceCount: Record<string, number> = {}; // 记录每个来源已采集的数量
     
-    // 定义信息源
+    // 定义信息源 - 优先 B站，国内源优先
     const sources = [
-      { engine: 'sogou', name: '搜狗搜索' },
-      { engine: 'bilibili', name: 'B站搜索' },
-      { engine: 'weibo', name: '微博热搜' },
-      { engine: 'bing', name: 'Bing搜索' }
+      // 中国信息源 - 优先获取 B站
+      { engine: 'bilibili', name: 'B站搜索', service: chinaSourcesService },
+      { engine: 'weibo', name: '微博热搜', service: chinaSourcesService },
+      { engine: 'sogou', name: '搜狗搜索', service: chinaSourcesService },
+      // 国际信息源 - 作为补充
+      { engine: 'bing', name: 'Bing搜索', service: internationalSourcesService },
+      { engine: 'google', name: 'Google搜索', service: internationalSourcesService },
+      { engine: 'duckduckgo', name: 'DuckDuckGo搜索', service: internationalSourcesService },
+      { engine: 'hackernews', name: 'HackerNews搜索', service: internationalSourcesService }
     ];
 
     // 逐个信息源搜索
     for (const source of sources) {
+      // 检查是否已经达到总数量限制
+      if (results.length >= limit) {
+        console.log(`✅ 已达到总数量限制 ${limit}，停止搜索`);
+        break;
+      }
+      
+      // 检查该来源是否已达到上限
+      const currentLimit = source.engine === 'bilibili' ? Math.min(9, limit) : Math.min(3, limit);
+      if ((sourceCount[source.engine] || 0) >= currentLimit) {
+        console.log(`⏭️ ${source.name} 已达到上限 (${currentLimit})，跳过`);
+        continue;
+      }
+      
       try {
         console.log(`🌐 开始从 ${source.name} 搜索...`);
-        const searchResults = await chinaSourcesService.search(source.engine, query, 3);
+        
+        // 每个信息源搜索的数量
+        const searchLimit = source.engine === 'bilibili' ? 4 : 3;
+        const searchResults = await source.service.search(source.engine, query, searchLimit);
         console.log(`📊 ${source.name} 找到 ${searchResults.length} 条结果`);
+        
+        if (searchResults.length === 0) {
+          console.log(`⏭️ ${source.name} 没有找到结果，继续下一个信息源`);
+          continue;
+        }
         
         // 分析每条搜索结果
         for (const result of searchResults) {
+          // 检查是否已经达到总数量限制
+          if (results.length >= limit) {
+            break;
+          }
+          
+          // 检查该来源是否已达到上限
+          const sourceLimit = source.engine === 'bilibili' ? Math.min(9, limit) : Math.min(3, limit);
+          if ((sourceCount[source.engine] || 0) >= sourceLimit) {
+            break;
+          }
+          
           try {
             // 首先检查时效性
             if (!this.isContentTimely(result)) {
@@ -642,6 +792,12 @@ class HotspotService {
               };
             }
 
+            // 检查相关性分数（>=60）
+            if (analysis.relevanceScore < 60) {
+              console.log(`⚠️ 相关性不足 (${analysis.relevanceScore}分)，跳过: ${result.title}`);
+              continue;
+            }
+
             // 计算热度分数
             const manualHeatScore = this.calculateHeatScore(result.viewCount, result.commentCount, result.likeCount);
 
@@ -663,12 +819,21 @@ class HotspotService {
               analysisReason: analysis.analysisReason,
               searchQuery: query
             });
+            
+            // 更新来源计数
+            sourceCount[source.engine] = (sourceCount[source.engine] || 0) + 1;
+            
+            console.log(`✅ ${source.name} 找到符合条件的结果: ${result.title}`);
           } catch (error) {
             console.error(`❌ 处理 ${source.name} 结果失败:`, error);
           }
         }
       } catch (error) {
         console.error(`❌ ${source.name} 搜索失败:`, error);
+        // 国外信息源报错时，直接跳过这个信息源
+        if (['bing', 'google', 'duckduckgo', 'hackernews'].includes(source.engine)) {
+          console.log(`⏭️ ${source.name} (国外源) 报错，直接跳过整个信息源`);
+        }
       }
     }
 
@@ -684,7 +849,7 @@ class HotspotService {
       return true;
     });
 
-    console.log(`🎉 全网搜索完成！共找到 ${uniqueResults.length} 条结果`);
+    console.log(`🎉 全网搜索完成！共找到 ${uniqueResults.length} 条符合条件的结果`);
     
     return uniqueResults.slice(0, limit);
   }

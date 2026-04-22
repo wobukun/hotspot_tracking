@@ -81,6 +81,18 @@ cronService.start();
 
 // 启动服务器
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`服务器运行在端口 ${PORT}`));
+
+server.listen(PORT, () => {
+  console.log(`服务器运行在端口 ${PORT}`);
+});
+
+server.on('error', (err: any) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`端口 ${PORT} 被占用！请先运行 "npm run kill" 清理端口后再启动`);
+    process.exit(1);
+  } else {
+    console.error('服务器错误:', err);
+  }
+});
 
 export { app, server, io };

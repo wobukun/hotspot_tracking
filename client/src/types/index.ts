@@ -51,7 +51,7 @@ export interface SystemConfig {
 }
 
 export type SortOption = 'crawlTime' | 'publishTime' | 'importance' | 'relevance' | 'heat';
-export type FilterSource = 'all' | 'twitter' | 'bing' | 'google' | 'duckduckgo' | 'sogou' | 'bilibili' | 'weibo';
+export type FilterSource = 'all' | 'twitter' | 'bing' | 'google' | 'duckduckgo' | 'hackernews' | 'sogou' | 'bilibili' | 'weibo';
 export type FilterImportance = 'all' | 'urgent' | 'high' | 'medium' | 'low';
 export type FilterAuthenticity = 'all' | 'trusted' | 'doubtful';
 export type FilterPublishTime = 'all' | 'today' | 'week' | 'month';
