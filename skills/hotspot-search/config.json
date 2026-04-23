@@ -1,0 +1,20 @@
+{
+  "search": {
+    "default_limit": 20,
+    "min_relevance_score": 60,
+    "max_days_old": 90
+  },
+  "sources": {
+    "bilibili": { "enabled": true, "limit": 9 },
+    "weibo": { "enabled": true, "limit": 3 },
+    "sogou": { "enabled": true, "limit": 3 },
+    "bing": { "enabled": true, "limit": 3 },
+    "google": { "enabled": true, "limit": 3 },
+    "duckduckgo": { "enabled": true, "limit": 3 },
+    "hackernews": { "enabled": true, "limit": 3 }
+  },
+  "timeout": {
+    "china_sources": 15,
+    "international_sources": 8
+  }
+}
